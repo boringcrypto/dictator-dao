@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "test": "hardhat test",
+    "format": "prettier --write contracts/**/*.sol *.js *.json test/**/*.js",
+    "pretty-quick": "pretty-quick",
+    "coverage": "hardhat coverage"
+  },
+  "dependencies": {
+    "@boringcrypto/boring-solidity": "boringcrypto/BoringSolidity",
+    "@boringcrypto/hardhat-framework": "boringcrypto/hardhat-framework"
+  }
+}
