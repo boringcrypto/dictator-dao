@@ -27,28 +27,46 @@ contract DictatorShares is ERC20 {
         token = token_;
     }
 
-    /// math is ok, because amount, totalSupply and shares is always 0 <= amount <= 100.000.000 * 10^18
-    /// theoretically you can grow the amount/share ratio, but it's not practical and useless
-    function mint(uint256 amount, address to) public returns (bool) {
+    function _mint(
+        address from,
+        address to,
+        uint256 amount
+    ) internal {
+        require(to != address(0), "DictatorShares: no zero address");
         uint256 totalTokens = token.balanceOf(address(this));
         uint256 shares = totalSupply == 0 ? amount : (amount * totalSupply) / totalTokens;
         balanceOf[to] += shares;
         totalSupply += shares;
 
-        token.safeTransferFrom(msg.sender, address(this), amount);
+        token.safeTransferFrom(from, address(this), amount);
 
         emit Transfer(address(0), to, shares);
-        return true;
     }
 
-    function burn(address to, uint256 shares) public returns (bool) {
+    function _burn(
+        address from,
+        address to,
+        uint256 shares
+    ) internal {
+        require(to != address(0), "DictatorShares: no zero address");
         uint256 amount = (shares * token.balanceOf(address(this))) / totalSupply;
-        balanceOf[msg.sender] = balanceOf[msg.sender].sub(shares); // Must check underflow
+        balanceOf[from] = balanceOf[from].sub(shares); // Must check underflow
         totalSupply -= shares;
 
         token.safeTransfer(to, amount);
 
-        emit Transfer(msg.sender, address(0), shares);
+        emit Transfer(from, address(0), shares);
+    }
+
+    /// math is ok, because amount, totalSupply and shares is always 0 <= amount <= 100.000.000 * 10^18
+    /// theoretically you can grow the amount/share ratio, but it's not practical and useless
+    function mint(address to, uint256 amount) public returns (bool) {
+        _mint(msg.sender, to, amount);
+        return true;
+    }
+
+    function burn(address to, uint256 shares) public returns (bool) {
+        _burn(msg.sender, to, shares);
         return true;
     }
 
@@ -57,23 +75,13 @@ contract DictatorShares is ERC20 {
         address to,
         uint256 shares
     ) public returns (bool) {
-        if (shares != 0) {
-            uint256 srcBalance = balanceOf[from];
-            require(srcBalance >= shares, "DictatorShares: balance too low");
-
-            uint256 spenderAllowance = allowance[from][msg.sender];
-            // If allowance is infinite, don't decrease it to save on gas.
-            if (spenderAllowance != type(uint256).max) {
-                require(spenderAllowance >= shares, "DictatorShares: allowance too low");
-                allowance[from][msg.sender] = spenderAllowance - shares; // Underflow is checked
-            }
-            require(to != address(0), "DictatorShares: no zero address"); // Moved down so other failed calls safe some gas
-            balanceOf[from] = srcBalance - shares; // Underflow is checked
-
-            token.safeTransfer(to, (shares * token.balanceOf(address(this))) / totalSupply);
+        uint256 spenderAllowance = allowance[from][msg.sender];
+        // If allowance is infinite, don't decrease it to save on gas.
+        if (spenderAllowance != type(uint256).max) {
+            require(spenderAllowance >= shares, "DictatorShares: allowance too low");
+            allowance[from][msg.sender] = spenderAllowance - shares; // Underflow is checked
         }
-
-        emit Transfer(from, address(0), shares);
+        _burn(from, to, shares);
         return true;
     }
 }
@@ -98,6 +106,9 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     uint256 public constant totalSupply = 100000000 * 1e18;
 
     uint256 immutable startTime;
+    uint16 public currentWeek;
+    mapping(uint16 => uint256) weekShares;
+    mapping(address => mapping(uint16 => uint256)) userWeekShares;
 
     constructor() public {
         // Register founding time
@@ -106,6 +117,28 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
         // Mint all tokens and assign to the contract (no need for minting code after this + safe some gas)
         balanceOf[address(this)] = totalSupply;
         emit Transfer(address(0), address(this), totalSupply);
+    }
+
+    function price() public view returns (uint256) {
+        uint256 timeLeft = (currentWeek + 1) * 7 days + startTime - block.timestamp;
+        uint256 timeLeftExp = timeLeft**8; // Max is 1.8e46
+        return timeLeftExp / 1e28;
+    }
+
+    function buy(uint16 week, address to) public payable returns (uint256) {
+        require(week == currentWeek, "Wrong week");
+        require(block.timestamp >= startTime + currentWeek * 7 days, "Not started");
+        uint256 tokensPerWeek = _tokensPerWeek();
+        uint256 currentPrice = price();
+        uint256 shares = msg.value;
+        userWeekShares[to][week] += shares;
+        weekShares[week] += shares;
+        require(weekShares[week].mul(1e18) / currentPrice < tokensPerWeek, "Oversold");
+    }
+
+    function nextWeek() public {
+        require(weekShares[currentWeek].mul(1e18) / price() > _tokensPerWeek(), "Not fully sold");
+        currentWeek++;
     }
 
     function _tokensPerWeek() internal view returns (uint256) {
@@ -122,7 +155,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount, address indexed to);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount, address indexed to);
     event Harvest(address indexed user, uint256 indexed pid, uint256 amount);
-    event LogPoolAddition(uint256 indexed pid, uint256 allocPoint, IERC20 indexed lpToken, IRewarder indexed rewarder);
+    event LogPoolAddition(uint256 indexed pid, uint256 allocPoint, IERC20 indexed poolToken, IRewarder indexed rewarder);
     event LogSetPool(uint256 indexed pid, uint256 allocPoint, IRewarder indexed rewarder, bool overwrite);
     event LogUpdatePool(uint256 indexed pid, uint64 lastRewardBlock, uint256 lpSupply, uint256 accTokensPerShare);
 
@@ -146,7 +179,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     /// @notice Info of each Distributor pool.
     PoolInfo[] public poolInfo;
     /// @notice Address of the LP token for each Distributor pool.
-    IERC20[] public lpToken;
+    IERC20[] public poolToken;
     /// @notice Address of each `IRewarder` contract in Distributor.
     IRewarder[] public rewarder;
 
@@ -168,20 +201,20 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     /// @notice Add a new LP to the pool. Can only be called by the owner.
     /// DO NOT add the same LP token more than once. Rewards will be messed up if you do.
     /// @param allocPoint AP of the new pool.
-    /// @param _lpToken Address of the LP ERC-20 token.
+    /// @param poolToken_ Address of the LP ERC-20 token.
     /// @param _rewarder Address of the rewarder delegate.
     function addPool(
         uint256 allocPoint,
-        IERC20 _lpToken,
+        IERC20 poolToken_,
         IRewarder _rewarder
     ) public onlyOwner {
         uint256 lastRewardBlock = block.number;
         totalAllocPoint = totalAllocPoint.add(allocPoint);
-        lpToken.push(_lpToken);
+        poolToken.push(poolToken_);
         rewarder.push(_rewarder);
 
         poolInfo.push(PoolInfo({allocPoint: allocPoint.to64(), lastRewardBlock: lastRewardBlock.to64(), accTokensPerShare: 0}));
-        emit LogPoolAddition(lpToken.length.sub(1), allocPoint, _lpToken, _rewarder);
+        emit LogPoolAddition(poolToken.length.sub(1), allocPoint, poolToken_, _rewarder);
     }
 
     /// @notice Update the given pool's tokens allocation point and `IRewarder` contract. Can only be called by the owner.
@@ -189,7 +222,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     /// @param _allocPoint New AP of the pool.
     /// @param _rewarder Address of the rewarder delegate.
     /// @param overwrite True if _rewarder should be `set`. Otherwise `_rewarder` is ignored.
-    function set(
+    function setPool(
         uint256 _pid,
         uint256 _allocPoint,
         IRewarder _rewarder,
@@ -210,15 +243,15 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     }
 
     /// @notice Migrate LP token to another LP contract through the `migrator` contract.
-    /// @param _pid The index of the pool. See `poolInfo`.
-    function migrate(uint256 _pid) public {
-        require(address(migrator) != address(0), "MasterChefV2: no migrator set");
-        IERC20 _lpToken = lpToken[_pid];
-        uint256 bal = _lpToken.balanceOf(address(this));
-        _lpToken.approve(address(migrator), bal);
-        IERC20 newLpToken = migrator.migrate(_lpToken);
-        require(bal == newLpToken.balanceOf(address(this)), "MasterChefV2: migrated balance must match");
-        lpToken[_pid] = newLpToken;
+    /// @param pid The index of the pool. See `poolInfo`.
+    function migratePool(uint256 pid) public {
+        require(address(migrator) != address(0), "DDAO: no migrator set");
+        IERC20 _poolToken = poolToken[pid];
+        uint256 bal = _poolToken.balanceOf(address(this));
+        _poolToken.approve(address(migrator), bal);
+        IERC20 newPoolToken = migrator.migrate(_poolToken);
+        require(bal == newPoolToken.balanceOf(address(this)), "DDAO: migrated balance must match");
+        poolToken[pid] = newPoolToken;
     }
 
     /// @notice View function to see pending tokens on frontend.
@@ -229,7 +262,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
         PoolInfo memory pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][_user];
         uint256 accTokensPerShare = pool.accTokensPerShare;
-        uint256 lpSupply = lpToken[_pid].balanceOf(address(this));
+        uint256 lpSupply = poolToken[_pid].balanceOf(address(this));
         if (block.number > pool.lastRewardBlock && lpSupply != 0) {
             uint256 blocks = block.number.sub(pool.lastRewardBlock);
             uint256 tokensReward = blocks.mul(_tokensPerBlock()).mul(pool.allocPoint) / totalAllocPoint;
@@ -253,7 +286,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     function updatePool(uint256 pid) public returns (PoolInfo memory pool) {
         pool = poolInfo[pid];
         if (block.number > pool.lastRewardBlock) {
-            uint256 lpSupply = lpToken[pid].balanceOf(address(this));
+            uint256 lpSupply = poolToken[pid].balanceOf(address(this));
             if (lpSupply > 0) {
                 uint256 blocks = block.number.sub(pool.lastRewardBlock);
                 uint256 tokensReward = blocks.mul(_tokensPerBlock()).mul(pool.allocPoint) / totalAllocPoint;
@@ -287,7 +320,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
             _rewarder.onTokensReward(pid, to, to, 0, user.amount);
         }
 
-        lpToken[pid].safeTransferFrom(msg.sender, address(this), amount);
+        poolToken[pid].safeTransferFrom(msg.sender, address(this), amount);
 
         emit Deposit(msg.sender, pid, amount, to);
     }
@@ -314,7 +347,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
             _rewarder.onTokensReward(pid, msg.sender, to, 0, user.amount);
         }
 
-        lpToken[pid].safeTransfer(to, amount);
+        poolToken[pid].safeTransfer(to, amount);
 
         emit Withdraw(msg.sender, pid, amount, to);
     }
@@ -374,7 +407,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
             _rewarder.onTokensReward(pid, msg.sender, to, _pendingTokens, user.amount);
         }
 
-        lpToken[pid].safeTransfer(to, amount);
+        poolToken[pid].safeTransfer(to, amount);
 
         emit Withdraw(msg.sender, pid, amount, to);
         emit Harvest(msg.sender, pid, _pendingTokens);
@@ -395,7 +428,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
         }
 
         // Note: transfer can fail or succeed if `amount` is zero.
-        lpToken[pid].safeTransfer(to, amount);
+        poolToken[pid].safeTransfer(to, amount);
         emit EmergencyWithdraw(msg.sender, pid, amount, to);
     }
 }
