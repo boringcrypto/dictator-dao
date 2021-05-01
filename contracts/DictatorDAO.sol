@@ -3,44 +3,53 @@ pragma solidity ^0.6.12;
 pragma experimental ABIEncoderV2;
 
 import "@boringcrypto/boring-solidity/contracts/libraries/BoringMath.sol";
-import "@boringcrypto/boring-solidity/contracts/libraries/BoringERC20.sol";
 import "@boringcrypto/boring-solidity/contracts/ERC20.sol";
 import "@boringcrypto/boring-solidity/contracts/BoringBatchable.sol";
-import "@boringcrypto/boring-solidity/contracts/BoringOwnable.sol";
 import "./libraries/SignedSafeMath.sol";
 import "./interfaces/IRewarder.sol";
-import "hardhat/console.sol";
 
-/// Inspired by Chef Nomi's SushiBar
-contract DictatorShares is ERC20 {
+// DAO code/operator management/dutch auction, etc by BoringCrypto
+// Staking in DictatorDAO inspired by Chef Nomi's SushiBar (heavily modified) - MIT license (originally WTFPL)
+// TimeLock functionality Copyright 2020 Compound Labs, Inc. - BSD 3-Clause "New" or "Revised" License
+// Token pool code from SushiSwap MasterChef V2, pioneered by Chef Nomi (I think, under WTFPL) and improved by Keno Budde - MIT license
+
+contract DictatorDAO is ERC20 {
     using BoringMath for uint256;
-    using BoringERC20 for IERC20;
 
     string public constant symbol = "DICS";
     string public constant name = "Dictator DAO Shares";
     uint8 public constant decimals = 18;
-    uint256 public totalSupply;
+    uint256 public override totalSupply;
 
-    IERC20 public token;
+    DictatorToken public immutable token;
+    address public operator;
 
-    constructor(IERC20 token_) public {
-        token = token_;
+    mapping(address => address) userVote;
+    mapping(address => uint256) votes;
+
+    constructor(address initialOperator) public {
+        // The DAO is the owner of the DictatorToken
+        token = new DictatorToken();
+        operator = initialOperator;
     }
 
-    function _mint(
-        address from,
-        address to,
-        uint256 amount
-    ) internal {
-        require(to != address(0), "DictatorShares: no zero address");
-        uint256 totalTokens = token.balanceOf(address(this));
-        uint256 shares = totalSupply == 0 ? amount : (amount * totalSupply) / totalTokens;
-        balanceOf[to] += shares;
-        totalSupply += shares;
+    // Operator Setting
+    address pendingOperator;
+    uint256 pendingOperatorTime;
 
-        token.safeTransferFrom(from, address(this), amount);
-
-        emit Transfer(address(0), to, shares);
+    function setOperator(address newOperator) public {
+        if (newOperator != pendingOperator) {
+            require(votes[newOperator] / 2 > totalSupply, "Not enough votes");
+            pendingOperator = newOperator;
+            pendingOperatorTime = block.timestamp + 7 days;
+        } else {
+            if (votes[newOperator] / 2 > totalSupply) {
+                require(block.timestamp >= pendingOperatorTime, "Wait longer");
+                operator = pendingOperator;
+            }
+            pendingOperator = address(0);
+            pendingOperatorTime = 0;
+        }
     }
 
     function _burn(
@@ -53,15 +62,41 @@ contract DictatorShares is ERC20 {
         balanceOf[from] = balanceOf[from].sub(shares); // Must check underflow
         totalSupply -= shares;
 
-        token.safeTransfer(to, amount);
+        votes[userVote[from]] -= shares;
+
+        token.transfer(to, amount);
 
         emit Transfer(from, address(0), shares);
     }
 
     /// math is ok, because amount, totalSupply and shares is always 0 <= amount <= 100.000.000 * 10^18
     /// theoretically you can grow the amount/share ratio, but it's not practical and useless
-    function mint(address to, uint256 amount) public returns (bool) {
-        _mint(msg.sender, to, amount);
+    function mint(
+        address to,
+        uint256 amount,
+        address operatorVote
+    ) public returns (bool) {
+        require(to != address(0), "DictatorDAO: no zero address");
+        address previousOperatorVote = userVote[msg.sender];
+        uint256 previousBalance = balanceOf[to];
+        if (msg.sender != to && previousBalance > 0) {
+            // If you mint for someone else and they already have a balance, their last vote gets used
+            operatorVote = previousOperatorVote;
+        }
+        uint256 totalTokens = token.balanceOf(address(this));
+        uint256 shares = totalSupply == 0 ? amount : (amount * totalSupply) / totalTokens;
+        balanceOf[to] = previousBalance + shares;
+        totalSupply += shares;
+        if (previousOperatorVote == operatorVote) {
+            votes[operatorVote] += shares;
+        } else {
+            votes[previousOperatorVote] -= previousBalance;
+            votes[operatorVote] = previousBalance + shares;
+        }
+
+        token.transferFrom(msg.sender, address(this), amount);
+
+        emit Transfer(address(0), to, shares);
         return true;
     }
 
@@ -84,6 +119,67 @@ contract DictatorShares is ERC20 {
         _burn(from, to, shares);
         return true;
     }
+
+    event QueueTransaction(bytes32 indexed txHash, address indexed target, uint256 value, bytes data, uint256 eta);
+    event CancelTransaction(bytes32 indexed txHash, address indexed target, uint256 value, bytes data);
+    event ExecuteTransaction(bytes32 indexed txHash, address indexed target, uint256 value, bytes data);
+
+    uint256 public constant GRACE_PERIOD = 14 days;
+    uint256 public constant delay = 2 days;
+    mapping(bytes32 => uint256) public queuedTransactions;
+
+    function queueTransaction(
+        address target,
+        uint256 value,
+        bytes memory data
+    ) public returns (bytes32) {
+        require(msg.sender == operator, "Operator only");
+        require(votes[operator] / 2 > totalSupply, "Not enough votes");
+
+        bytes32 txHash = keccak256(abi.encode(target, value, data));
+        uint256 eta = block.timestamp + delay;
+        queuedTransactions[txHash] = eta;
+
+        emit QueueTransaction(txHash, target, value, data, eta);
+        return txHash;
+    }
+
+    function cancelTransaction(
+        address target,
+        uint256 value,
+        bytes memory data
+    ) public {
+        require(msg.sender == operator, "Operator only");
+
+        bytes32 txHash = keccak256(abi.encode(target, value, data));
+        queuedTransactions[txHash] = 0;
+
+        emit CancelTransaction(txHash, target, value, data);
+    }
+
+    function executeTransaction(
+        address target,
+        uint256 value,
+        bytes memory data
+    ) public payable returns (bytes memory) {
+        require(msg.sender == operator, "Operator only");
+        require(votes[operator] / 2 > totalSupply, "Not enough votes");
+
+        bytes32 txHash = keccak256(abi.encode(target, value, data));
+        uint256 eta = queuedTransactions[txHash];
+        require(block.timestamp >= eta, "Too early");
+        require(block.timestamp <= eta + GRACE_PERIOD, "Tx stale");
+
+        queuedTransactions[txHash] = 0;
+
+        // solium-disable-next-line security/no-call-value
+        (bool success, bytes memory returnData) = target.call{value: value}(data);
+        require(success, "Tx reverted :(");
+
+        emit ExecuteTransaction(txHash, target, value, data);
+
+        return returnData;
+    }
 }
 
 interface IMigratorChef {
@@ -92,9 +188,7 @@ interface IMigratorChef {
     function migrate(IERC20 token) external returns (IERC20);
 }
 
-// DAO code by BoringCrypto
-// Token pool code from SushiSwap MasterChef V2, pioneered by Chef Nomi (I think) and improved by Keno Budde
-contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
+contract DictatorToken is ERC20, BoringBatchable {
     using BoringMath for uint256;
     using BoringMath128 for uint128;
     using SignedSafeMath for int256;
@@ -103,7 +197,9 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     string public constant symbol = "DIC";
     string public constant name = "Dictator DAO Token";
     uint8 public constant decimals = 18;
-    uint256 public constant totalSupply = 100000000 * 1e18;
+    uint256 public constant override totalSupply = 100000000 * 1e18;
+
+    DictatorDAO public immutable DAO;
 
     uint256 immutable startTime;
     uint16 public currentWeek;
@@ -111,12 +207,19 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     mapping(address => mapping(uint16 => uint256)) userWeekShares;
 
     constructor() public {
+        DAO = DictatorDAO(msg.sender);
+
         // Register founding time
         startTime = block.timestamp;
 
-        // Mint all tokens and assign to the contract (no need for minting code after this + safe some gas)
+        // Mint all tokens and assign to the contract (no need for minting code after this + save some gas)
         balanceOf[address(this)] = totalSupply;
         emit Transfer(address(0), address(this), totalSupply);
+    }
+
+    modifier onlyOperator() {
+        require(msg.sender == DAO.operator(), "Dictator: not operator");
+        _;
     }
 
     function price() public view returns (uint256) {
@@ -149,6 +252,10 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
     function _tokensPerBlock() internal view returns (uint256) {
         uint256 elapsed = (block.timestamp - startTime) / 7 days;
         return elapsed < 50 ? 219780e14 : elapsed < 100 ? 109890e14 : elapsed < 150 ? 65934e14 : elapsed < 200 ? 43956e14 : 0;
+    }
+
+    function retrieveOperatorPayment(address to) public onlyOperator returns (bool success) {
+        (success, ) = to.call{value: address(this).balance}("");
     }
 
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount, address indexed to);
@@ -207,7 +314,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
         uint256 allocPoint,
         IERC20 poolToken_,
         IRewarder _rewarder
-    ) public onlyOwner {
+    ) public onlyOperator {
         uint256 lastRewardBlock = block.number;
         totalAllocPoint = totalAllocPoint.add(allocPoint);
         poolToken.push(poolToken_);
@@ -227,7 +334,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
         uint256 _allocPoint,
         IRewarder _rewarder,
         bool overwrite
-    ) public onlyOwner {
+    ) public onlyOperator {
         totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(_allocPoint);
         poolInfo[_pid].allocPoint = _allocPoint.to64();
         if (overwrite) {
@@ -238,7 +345,7 @@ contract DictatorDAO is ERC20, BoringBatchable, BoringOwnable {
 
     /// @notice Set the `migrator` contract. Can only be called by the owner.
     /// @param _migrator The contract address to set.
-    function setMigrator(IMigratorChef _migrator) public onlyOwner {
+    function setMigrator(IMigratorChef _migrator) public onlyOperator {
         migrator = _migrator;
     }
 
