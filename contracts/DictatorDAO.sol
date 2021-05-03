@@ -3,6 +3,7 @@ pragma solidity ^0.6.12;
 pragma experimental ABIEncoderV2;
 
 import "@boringcrypto/boring-solidity/contracts/libraries/BoringMath.sol";
+import "@boringcrypto/boring-solidity/contracts/Domain.sol";
 import "@boringcrypto/boring-solidity/contracts/ERC20.sol";
 import "@boringcrypto/boring-solidity/contracts/BoringBatchable.sol";
 import "./libraries/SignedSafeMath.sol";
@@ -13,8 +14,9 @@ import "./interfaces/IRewarder.sol";
 // TimeLock functionality Copyright 2020 Compound Labs, Inc. - BSD 3-Clause "New" or "Revised" License
 // Token pool code from SushiSwap MasterChef V2, pioneered by Chef Nomi (I think, under WTFPL) and improved by Keno Budde - MIT license
 
-contract DictatorDAO is ERC20 {
+contract DictatorDAO is IERC20, Domain {
     using BoringMath for uint256;
+    using BoringMath128 for uint128;
 
     string public constant symbol = "DICS";
     string public constant name = "Dictator DAO Shares";
@@ -31,6 +33,124 @@ contract DictatorDAO is ERC20 {
         // The DAO is the owner of the DictatorToken
         token = new DictatorToken();
         operator = initialOperator;
+    }
+
+    struct User {
+        uint128 balance;
+        uint128 lockedUntil;
+    }
+
+    /// @notice owner > balance mapping.
+    mapping(address => User) public users;
+    /// @notice owner > spender > allowance mapping.
+    mapping(address => mapping(address => uint256)) public override allowance;
+    /// @notice owner > nonce mapping. Used in `permit`.
+    mapping(address => uint256) public nonces;
+
+    event Transfer(address indexed _from, address indexed _to, uint256 _value);
+    event Approval(address indexed _owner, address indexed _spender, uint256 _value);
+
+    function balanceOf(address user) public view override returns (uint256 balance) {
+        return users[user].balance;
+    }
+
+    /// @notice Transfers `amount` tokens from `msg.sender` to `to`.
+    /// @param to The address to move the tokens.
+    /// @param amount of the tokens to move.
+    /// @return (bool) Returns True if succeeded.
+    function transfer(address to, uint256 amount) public returns (bool) {
+        User memory user = users[msg.sender];
+        require(block.timestamp >= user.lockedUntil, "Locked");
+        // If `amount` is 0, or `msg.sender` is `to` nothing happens
+        if (amount != 0) {
+            uint256 srcBalance = user.balance;
+            require(srcBalance >= amount, "ERC20: balance too low");
+            if (msg.sender != to) {
+                require(to != address(0), "ERC20: no zero address"); // Moved down so low balance calls safe some gas
+
+                users[msg.sender].balance = (srcBalance - amount).to128(); // Underflow is checked
+                users[to].balance += amount.to128(); // Can't overflow because totalSupply would be greater than 2^256-1
+            }
+        }
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    /// @notice Transfers `amount` tokens from `from` to `to`. Caller needs approval for `from`.
+    /// @param from Address to draw tokens from.
+    /// @param to The address to move the tokens.
+    /// @param amount The token amount to move.
+    /// @return (bool) Returns True if succeeded.
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public returns (bool) {
+        User memory user = users[from];
+        require(block.timestamp >= user.lockedUntil, "Locked");
+        // If `amount` is 0, or `from` is `to` nothing happens
+        if (amount != 0) {
+            uint256 srcBalance = user.balance;
+            require(srcBalance >= amount, "ERC20: balance too low");
+
+            if (from != to) {
+                uint256 spenderAllowance = allowance[from][msg.sender];
+                // If allowance is infinite, don't decrease it to save on gas (breaks with EIP-20).
+                if (spenderAllowance != type(uint256).max) {
+                    require(spenderAllowance >= amount, "ERC20: allowance too low");
+                    allowance[from][msg.sender] = spenderAllowance - amount; // Underflow is checked
+                }
+                require(to != address(0), "ERC20: no zero address"); // Moved down so other failed calls safe some gas
+
+                users[from].balance = (srcBalance - amount).to128(); // Underflow is checked
+                users[to].balance += amount.to128(); // Can't overflow because totalSupply would be greater than 2^256-1
+            }
+        }
+        emit Transfer(from, to, amount);
+        return true;
+    }
+
+    /// @notice Approves `amount` from sender to be spend by `spender`.
+    /// @param spender Address of the party that can draw from msg.sender's account.
+    /// @param amount The maximum collective amount that `spender` can draw.
+    /// @return (bool) Returns True if approved.
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    // solhint-disable-next-line func-name-mixedcase
+    function DOMAIN_SEPARATOR() external view returns (bytes32) {
+        return _domainSeparator();
+    }
+
+    // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+    bytes32 private constant PERMIT_SIGNATURE_HASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
+
+    /// @notice Approves `value` from `owner_` to be spend by `spender`.
+    /// @param owner_ Address of the owner.
+    /// @param spender The address of the spender that gets approved to draw from `owner_`.
+    /// @param value The maximum collective amount that `spender` can draw.
+    /// @param deadline This permit must be redeemed before this deadline (UTC timestamp in seconds).
+    function permit(
+        address owner_,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external override {
+        require(owner_ != address(0), "ERC20: Owner cannot be 0");
+        require(block.timestamp < deadline, "ERC20: Expired");
+        require(
+            ecrecover(_getDigest(keccak256(abi.encode(PERMIT_SIGNATURE_HASH, owner_, spender, value, nonces[owner_]++, deadline))), v, r, s) ==
+                owner_,
+            "ERC20: Invalid Signature"
+        );
+        allowance[owner_][spender] = value;
+        emit Approval(owner_, spender, value);
     }
 
     // Operator Setting
@@ -58,8 +178,10 @@ contract DictatorDAO is ERC20 {
         uint256 shares
     ) internal {
         require(to != address(0), "DictatorShares: no zero address");
+        User memory user = users[from];
+        require(block.timestamp >= user.lockedUntil, "Locked");
         uint256 amount = (shares * token.balanceOf(address(this))) / totalSupply;
-        balanceOf[from] = balanceOf[from].sub(shares); // Must check underflow
+        users[from].balance = user.balance.sub(shares.to128()); // Must check underflow
         totalSupply -= shares;
 
         votes[userVote[from]] -= shares;
@@ -77,15 +199,19 @@ contract DictatorDAO is ERC20 {
         address operatorVote
     ) public returns (bool) {
         require(to != address(0), "DictatorDAO: no zero address");
+        User memory user = users[to];
+
         address previousOperatorVote = userVote[msg.sender];
-        uint256 previousBalance = balanceOf[to];
+        uint256 previousBalance = user.balance;
         if (msg.sender != to && previousBalance > 0) {
             // If you mint for someone else and they already have a balance, their last vote gets used
             operatorVote = previousOperatorVote;
         }
         uint256 totalTokens = token.balanceOf(address(this));
         uint256 shares = totalSupply == 0 ? amount : (amount * totalSupply) / totalTokens;
-        balanceOf[to] = previousBalance + shares;
+        user.balance = (previousBalance + shares).to128();
+        user.lockedUntil = (block.timestamp + 24 hours).to128();
+        users[to] = user;
         totalSupply += shares;
         if (previousOperatorVote == operatorVote) {
             votes[operatorVote] += shares;
@@ -125,7 +251,7 @@ contract DictatorDAO is ERC20 {
     event ExecuteTransaction(bytes32 indexed txHash, address indexed target, uint256 value, bytes data);
 
     uint256 public constant GRACE_PERIOD = 14 days;
-    uint256 public constant delay = 2 days;
+    uint256 public constant DELAY = 2 days;
     mapping(bytes32 => uint256) public queuedTransactions;
 
     function queueTransaction(
@@ -137,7 +263,7 @@ contract DictatorDAO is ERC20 {
         require(votes[operator] / 2 > totalSupply, "Not enough votes");
 
         bytes32 txHash = keccak256(abi.encode(target, value, data));
-        uint256 eta = block.timestamp + delay;
+        uint256 eta = block.timestamp + DELAY;
         queuedTransactions[txHash] = eta;
 
         emit QueueTransaction(txHash, target, value, data, eta);
@@ -230,10 +356,13 @@ contract DictatorToken is ERC20, BoringBatchable {
 
     function buy(uint16 week, address to) public payable returns (uint256) {
         require(week == currentWeek, "Wrong week");
-        require(block.timestamp >= startTime + currentWeek * 7 days, "Not started");
+        uint256 weekStart = startTime + currentWeek * 7 days;
+        require(block.timestamp >= weekStart, "Not started");
+        uint256 elapsed = block.timestamp - weekStart;
         uint256 tokensPerWeek = _tokensPerWeek();
         uint256 currentPrice = price();
-        uint256 shares = msg.value;
+        // Shares = value + part of value based on how much of the week has passed (starts at 50%, to 0% at the end of the week)
+        uint256 shares = msg.value + elapsed < 7 days ? ((7 days - elapsed) * msg.value) / 14 days : 0;
         userWeekShares[to][week] += shares;
         weekShares[week] += shares;
         require(weekShares[week].mul(1e18) / currentPrice < tokensPerWeek, "Oversold");
@@ -246,12 +375,15 @@ contract DictatorToken is ERC20, BoringBatchable {
 
     function _tokensPerWeek() internal view returns (uint256) {
         uint256 elapsed = (block.timestamp - startTime) / 7 days;
-        return elapsed < 50 ? 1000000e18 : elapsed < 100 ? 500000e18 : elapsed < 150 ? 300000e18 : elapsed < 200 ? 200000e18 : 0;
+        return
+            elapsed < 2 ? 1000000 : elapsed < 50 ? 100000e18 : elapsed < 100 ? 50000e18 : elapsed < 150 ? 30000e18 : elapsed < 200
+                ? 20000e18
+                : 0;
     }
 
     function _tokensPerBlock() internal view returns (uint256) {
         uint256 elapsed = (block.timestamp - startTime) / 7 days;
-        return elapsed < 50 ? 219780e14 : elapsed < 100 ? 109890e14 : elapsed < 150 ? 65934e14 : elapsed < 200 ? 43956e14 : 0;
+        return elapsed < 2 ? 0 : elapsed < 50 ? 219780e14 : elapsed < 100 ? 109890e14 : elapsed < 150 ? 65934e14 : elapsed < 200 ? 43956e14 : 0;
     }
 
     function retrieveOperatorPayment(address to) public onlyOperator returns (bool success) {
