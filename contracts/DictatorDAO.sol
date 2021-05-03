@@ -54,59 +54,67 @@ contract DictatorDAO is IERC20, Domain {
         return users[user].balance;
     }
 
-    /// @notice Transfers `amount` tokens from `msg.sender` to `to`.
-    /// @param to The address to move the tokens.
-    /// @param amount of the tokens to move.
-    /// @return (bool) Returns True if succeeded.
-    function transfer(address to, uint256 amount) public returns (bool) {
-        User memory user = users[msg.sender];
-        require(block.timestamp >= user.lockedUntil, "Locked");
-        // If `amount` is 0, or `msg.sender` is `to` nothing happens
-        if (amount != 0) {
-            uint256 srcBalance = user.balance;
-            require(srcBalance >= amount, "ERC20: balance too low");
-            if (msg.sender != to) {
-                require(to != address(0), "ERC20: no zero address"); // Moved down so low balance calls safe some gas
+    function _transfer(
+        address from,
+        address to,
+        uint256 shares
+    ) internal {
+        User memory fromUser = users[from];
+        require(block.timestamp >= fromUser.lockedUntil, "Locked");
+        if (shares != 0) {
+            require(fromUser.balance >= shares, "Low balance");
+            if (from != to) {
+                require(to != address(0), "Zero address"); // Moved down so other failed calls safe some gas
+                User memory toUser = users[to];
 
-                users[msg.sender].balance = (srcBalance - amount).to128(); // Underflow is checked
-                users[to].balance += amount.to128(); // Can't overflow because totalSupply would be greater than 2^256-1
+                address userVoteTo = userVote[to];
+                address userVoteFrom = userVote[from];
+                // If the to has no vote and no balance, copy the from vote
+                address operatorVote = toUser.balance > 0 && userVoteTo == address(0) ? userVoteTo : userVoteFrom;
+
+                users[from].balance = fromUser.balance - shares.to128(); // Underflow is checked
+                users[to].balance = toUser.balance + shares.to128(); // Can't overflow because totalSupply would be greater than 2^256-1
+                votes[userVoteFrom] -= shares;
+                votes[operatorVote] += shares;
+                userVote[to] = operatorVote;
             }
         }
-        emit Transfer(msg.sender, to, amount);
+        emit Transfer(from, to, shares);
+    }
+
+    function _useAllowance(address from, uint256 shares) internal {
+        if (msg.sender == from) {
+            return;
+        }
+        uint256 spenderAllowance = allowance[from][msg.sender];
+        // If allowance is infinite, don't decrease it to save on gas (breaks with EIP-20).
+        if (spenderAllowance != type(uint256).max) {
+            require(spenderAllowance >= shares, "Low allowance");
+            allowance[from][msg.sender] = spenderAllowance - shares; // Underflow is checked
+        }
+    }
+
+    /// @notice Transfers `shares` tokens from `msg.sender` to `to`.
+    /// @param to The address to move the tokens.
+    /// @param shares of the tokens to move.
+    /// @return (bool) Returns True if succeeded.
+    function transfer(address to, uint256 shares) public returns (bool) {
+        _transfer(msg.sender, to, shares);
         return true;
     }
 
-    /// @notice Transfers `amount` tokens from `from` to `to`. Caller needs approval for `from`.
+    /// @notice Transfers `shares` tokens from `from` to `to`. Caller needs approval for `from`.
     /// @param from Address to draw tokens from.
     /// @param to The address to move the tokens.
-    /// @param amount The token amount to move.
+    /// @param shares The token shares to move.
     /// @return (bool) Returns True if succeeded.
     function transferFrom(
         address from,
         address to,
-        uint256 amount
+        uint256 shares
     ) public returns (bool) {
-        User memory user = users[from];
-        require(block.timestamp >= user.lockedUntil, "Locked");
-        // If `amount` is 0, or `from` is `to` nothing happens
-        if (amount != 0) {
-            uint256 srcBalance = user.balance;
-            require(srcBalance >= amount, "ERC20: balance too low");
-
-            if (from != to) {
-                uint256 spenderAllowance = allowance[from][msg.sender];
-                // If allowance is infinite, don't decrease it to save on gas (breaks with EIP-20).
-                if (spenderAllowance != type(uint256).max) {
-                    require(spenderAllowance >= amount, "ERC20: allowance too low");
-                    allowance[from][msg.sender] = spenderAllowance - amount; // Underflow is checked
-                }
-                require(to != address(0), "ERC20: no zero address"); // Moved down so other failed calls safe some gas
-
-                users[from].balance = (srcBalance - amount).to128(); // Underflow is checked
-                users[to].balance += amount.to128(); // Can't overflow because totalSupply would be greater than 2^256-1
-            }
-        }
-        emit Transfer(from, to, amount);
+        _useAllowance(from, shares);
+        _transfer(from, to, shares);
         return true;
     }
 
@@ -142,12 +150,12 @@ contract DictatorDAO is IERC20, Domain {
         bytes32 r,
         bytes32 s
     ) external override {
-        require(owner_ != address(0), "ERC20: Owner cannot be 0");
-        require(block.timestamp < deadline, "ERC20: Expired");
+        require(owner_ != address(0), "Zero owner");
+        require(block.timestamp < deadline, "Expired");
         require(
             ecrecover(_getDigest(keccak256(abi.encode(PERMIT_SIGNATURE_HASH, owner_, spender, value, nonces[owner_]++, deadline))), v, r, s) ==
                 owner_,
-            "ERC20: Invalid Signature"
+            "Invalid Sig"
         );
         allowance[owner_][spender] = value;
         emit Approval(owner_, spender, value);
@@ -172,58 +180,42 @@ contract DictatorDAO is IERC20, Domain {
         }
     }
 
+    /// math is ok, because amount, totalSupply and shares is always 0 <= amount <= 100.000.000 * 10^18
+    /// theoretically you can grow the amount/share ratio, but it's not practical and useless
+    function mint(uint256 amount, address operatorVote) public returns (bool) {
+        require(msg.sender != address(0), "Zero address");
+        User memory user = users[msg.sender];
+
+        uint256 totalTokens = token.balanceOf(address(this));
+        uint256 shares = totalSupply == 0 ? amount : (amount * totalSupply) / totalTokens;
+        user.balance += shares.to128();
+        user.lockedUntil = (block.timestamp + 24 hours).to128();
+        users[msg.sender] = user;
+        totalSupply += shares;
+        votes[operatorVote] += shares;
+
+        token.transferFrom(msg.sender, address(this), amount);
+
+        emit Transfer(address(0), msg.sender, shares);
+        return true;
+    }
+
     function _burn(
         address from,
         address to,
         uint256 shares
     ) internal {
-        require(to != address(0), "DictatorShares: no zero address");
+        require(to != address(0), "Zero address");
         User memory user = users[from];
         require(block.timestamp >= user.lockedUntil, "Locked");
         uint256 amount = (shares * token.balanceOf(address(this))) / totalSupply;
         users[from].balance = user.balance.sub(shares.to128()); // Must check underflow
         totalSupply -= shares;
-
         votes[userVote[from]] -= shares;
 
         token.transfer(to, amount);
 
         emit Transfer(from, address(0), shares);
-    }
-
-    /// math is ok, because amount, totalSupply and shares is always 0 <= amount <= 100.000.000 * 10^18
-    /// theoretically you can grow the amount/share ratio, but it's not practical and useless
-    function mint(
-        address to,
-        uint256 amount,
-        address operatorVote
-    ) public returns (bool) {
-        require(to != address(0), "DictatorDAO: no zero address");
-        User memory user = users[to];
-
-        address previousOperatorVote = userVote[msg.sender];
-        uint256 previousBalance = user.balance;
-        if (msg.sender != to && previousBalance > 0) {
-            // If you mint for someone else and they already have a balance, their last vote gets used
-            operatorVote = previousOperatorVote;
-        }
-        uint256 totalTokens = token.balanceOf(address(this));
-        uint256 shares = totalSupply == 0 ? amount : (amount * totalSupply) / totalTokens;
-        user.balance = (previousBalance + shares).to128();
-        user.lockedUntil = (block.timestamp + 24 hours).to128();
-        users[to] = user;
-        totalSupply += shares;
-        if (previousOperatorVote == operatorVote) {
-            votes[operatorVote] += shares;
-        } else {
-            votes[previousOperatorVote] -= previousBalance;
-            votes[operatorVote] = previousBalance + shares;
-        }
-
-        token.transferFrom(msg.sender, address(this), amount);
-
-        emit Transfer(address(0), to, shares);
-        return true;
     }
 
     function burn(address to, uint256 shares) public returns (bool) {
@@ -236,12 +228,7 @@ contract DictatorDAO is IERC20, Domain {
         address to,
         uint256 shares
     ) public returns (bool) {
-        uint256 spenderAllowance = allowance[from][msg.sender];
-        // If allowance is infinite, don't decrease it to save on gas.
-        if (spenderAllowance != type(uint256).max) {
-            require(spenderAllowance >= shares, "DictatorShares: allowance too low");
-            allowance[from][msg.sender] = spenderAllowance - shares; // Underflow is checked
-        }
+        _useAllowance(from, shares);
         _burn(from, to, shares);
         return true;
     }
@@ -344,7 +331,7 @@ contract DictatorToken is ERC20, BoringBatchable {
     }
 
     modifier onlyOperator() {
-        require(msg.sender == DAO.operator(), "Dictator: not operator");
+        require(msg.sender == DAO.operator(), "Not operator");
         _;
     }
 
@@ -484,12 +471,12 @@ contract DictatorToken is ERC20, BoringBatchable {
     /// @notice Migrate LP token to another LP contract through the `migrator` contract.
     /// @param pid The index of the pool. See `poolInfo`.
     function migratePool(uint256 pid) public {
-        require(address(migrator) != address(0), "DDAO: no migrator set");
+        require(address(migrator) != address(0), "No migrator");
         IERC20 _poolToken = poolToken[pid];
         uint256 bal = _poolToken.balanceOf(address(this));
         _poolToken.approve(address(migrator), bal);
         IERC20 newPoolToken = migrator.migrate(_poolToken);
-        require(bal == newPoolToken.balanceOf(address(this)), "DDAO: migrated balance must match");
+        require(bal == newPoolToken.balanceOf(address(this)), "Migrated balance mismatch");
         poolToken[pid] = newPoolToken;
     }
 
