@@ -13,13 +13,12 @@ import "./interfaces/IRewarder.sol";
 // Staking in DictatorDAO inspired by Chef Nomi's SushiBar (heavily modified) - MIT license (originally WTFPL)
 // TimeLock functionality Copyright 2020 Compound Labs, Inc. - BSD 3-Clause "New" or "Revised" License
 // Token pool code from SushiSwap MasterChef V2, pioneered by Chef Nomi (I think, under WTFPL) and improved by Keno Budde - MIT license
-
 contract DictatorDAO is IERC20, Domain {
     using BoringMath for uint256;
     using BoringMath128 for uint128;
 
-    string public constant symbol = "DICS";
-    string public constant name = "Dictator DAO Shares";
+    string public symbol;
+    string public name;
     uint8 public constant decimals = 18;
     uint256 public override totalSupply;
 
@@ -29,9 +28,18 @@ contract DictatorDAO is IERC20, Domain {
     mapping(address => address) userVote;
     mapping(address => uint256) votes;
 
-    constructor(address initialOperator) public {
+    constructor(
+        string memory tokenSymbol,
+        string memory tokenName,
+        string memory sharesSymbol,
+        string memory sharesName,
+        address initialOperator
+    ) public {
         // The DAO is the owner of the DictatorToken
-        token = new DictatorToken();
+        token = new DictatorToken(tokenSymbol, tokenName);
+
+        symbol = sharesSymbol;
+        name = sharesName;
         operator = initialOperator;
     }
 
@@ -307,10 +315,10 @@ contract DictatorToken is ERC20, BoringBatchable {
     using SignedSafeMath for int256;
     using BoringERC20 for IERC20;
 
-    string public constant symbol = "DIC";
-    string public constant name = "Dictator DAO Token";
+    string public symbol;
+    string public name;
     uint8 public constant decimals = 18;
-    uint256 public constant override totalSupply = 100000000 * 1e18;
+    uint256 public constant totalSupply = 100000000 * 1e18;
 
     DictatorDAO public immutable DAO;
 
@@ -319,7 +327,9 @@ contract DictatorToken is ERC20, BoringBatchable {
     mapping(uint16 => uint256) weekShares;
     mapping(address => mapping(uint16 => uint256)) userWeekShares;
 
-    constructor() public {
+    constructor(string memory symbol_, string memory name_) public {
+        symbol = symbol_;
+        name = name_;
         DAO = DictatorDAO(msg.sender);
 
         // Register founding time
