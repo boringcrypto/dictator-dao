@@ -315,6 +315,9 @@ contract DictatorToken is ERC20, BoringBatchable {
     using SignedSafeMath for int256;
     using BoringERC20 for IERC20;
 
+    uint256 constant WEEK = 7 days;
+    uint256 constant BONUS_DIVISOR = 14 days;
+
     string public symbol;
     string public name;
     uint8 public constant decimals = 18;
@@ -322,10 +325,10 @@ contract DictatorToken is ERC20, BoringBatchable {
 
     DictatorDAO public immutable DAO;
 
-    uint256 immutable startTime;
+    uint256 public immutable startTime;
     uint16 public currentWeek;
-    mapping(uint16 => uint256) weekShares;
-    mapping(address => mapping(uint16 => uint256)) userWeekShares;
+    mapping(uint16 => uint256) public weekShares;
+    mapping(address => mapping(uint16 => uint256)) public userWeekShares;
 
     constructor(string memory symbol_, string memory name_) public {
         symbol = symbol_;
@@ -346,40 +349,37 @@ contract DictatorToken is ERC20, BoringBatchable {
     }
 
     function price() public view returns (uint256) {
-        uint256 timeLeft = (currentWeek + 1) * 7 days + startTime - block.timestamp;
+        uint256 timeLeft = (currentWeek + 1) * WEEK + startTime - block.timestamp;
         uint256 timeLeftExp = timeLeft**8; // Max is 1.8e46
         return timeLeftExp / 1e28;
     }
 
     function buy(uint16 week, address to) public payable returns (uint256) {
         require(week == currentWeek, "Wrong week");
-        uint256 weekStart = startTime + currentWeek * 7 days;
+        uint256 weekStart = startTime + currentWeek * WEEK;
         require(block.timestamp >= weekStart, "Not started");
+        require(block.timestamp < weekStart + WEEK, "Ended");
         uint256 elapsed = block.timestamp - weekStart;
-        uint256 tokensPerWeek = _tokensPerWeek();
+        uint256 tokensPerWeek = tokensPerWeek(currentWeek);
         uint256 currentPrice = price();
         // Shares = value + part of value based on how much of the week has passed (starts at 50%, to 0% at the end of the week)
-        uint256 shares = msg.value + elapsed < 7 days ? ((7 days - elapsed) * msg.value) / 14 days : 0;
+        uint256 shares = msg.value + elapsed < WEEK ? ((WEEK - elapsed) * msg.value) / BONUS_DIVISOR : 0;
         userWeekShares[to][week] += shares;
         weekShares[week] += shares;
         require(weekShares[week].mul(1e18) / currentPrice < tokensPerWeek, "Oversold");
     }
 
     function nextWeek() public {
-        require(weekShares[currentWeek].mul(1e18) / price() > _tokensPerWeek(), "Not fully sold");
+        require(weekShares[currentWeek].mul(1e18) / price() > tokensPerWeek(currentWeek), "Not fully sold");
         currentWeek++;
     }
 
-    function _tokensPerWeek() internal view returns (uint256) {
-        uint256 elapsed = (block.timestamp - startTime) / 7 days;
-        return
-            elapsed < 2 ? 1000000 : elapsed < 50 ? 100000e18 : elapsed < 100 ? 50000e18 : elapsed < 150 ? 30000e18 : elapsed < 200
-                ? 20000e18
-                : 0;
+    function tokensPerWeek(uint256 week) public pure returns (uint256) {
+        return week < 2 ? 1000000 : week < 50 ? 100000e18 : week < 100 ? 50000e18 : week < 150 ? 30000e18 : week < 200 ? 20000e18 : 0;
     }
 
-    function _tokensPerBlock() internal view returns (uint256) {
-        uint256 elapsed = (block.timestamp - startTime) / 7 days;
+    function tokensPerBlock() public view returns (uint256) {
+        uint256 elapsed = (block.timestamp - startTime) / WEEK;
         return elapsed < 2 ? 0 : elapsed < 50 ? 219780e14 : elapsed < 100 ? 109890e14 : elapsed < 150 ? 65934e14 : elapsed < 200 ? 43956e14 : 0;
     }
 
@@ -501,7 +501,7 @@ contract DictatorToken is ERC20, BoringBatchable {
         uint256 lpSupply = poolToken[_pid].balanceOf(address(this));
         if (block.number > pool.lastRewardBlock && lpSupply != 0) {
             uint256 blocks = block.number.sub(pool.lastRewardBlock);
-            uint256 tokensReward = blocks.mul(_tokensPerBlock()).mul(pool.allocPoint) / totalAllocPoint;
+            uint256 tokensReward = blocks.mul(tokensPerBlock()).mul(pool.allocPoint) / totalAllocPoint;
             accTokensPerShare = accTokensPerShare.add(tokensReward.mul(ACC_TOKENS_PRECISION) / lpSupply);
         }
         pending = int256(user.amount.mul(accTokensPerShare) / ACC_TOKENS_PRECISION).sub(user.rewardDebt).toUInt256();
@@ -525,7 +525,7 @@ contract DictatorToken is ERC20, BoringBatchable {
             uint256 lpSupply = poolToken[pid].balanceOf(address(this));
             if (lpSupply > 0) {
                 uint256 blocks = block.number.sub(pool.lastRewardBlock);
-                uint256 tokensReward = blocks.mul(_tokensPerBlock()).mul(pool.allocPoint) / totalAllocPoint;
+                uint256 tokensReward = blocks.mul(tokensPerBlock()).mul(pool.allocPoint) / totalAllocPoint;
                 pool.accTokensPerShare = pool.accTokensPerShare.add((tokensReward.mul(ACC_TOKENS_PRECISION) / lpSupply).to128());
             }
             pool.lastRewardBlock = block.number.to64();

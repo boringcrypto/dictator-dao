@@ -3,10 +3,19 @@
     "test": "hardhat test",
     "format": "prettier --write contracts/**/*.sol *.js *.json test/**/*.js",
     "pretty-quick": "pretty-quick",
-    "coverage": "hardhat coverage"
+    "coverage": "hardhat coverage",
+    "ts": "yarn run typechain --target ethers-v5 \"artifacts/contracts/DictatorDAOFlat.sol/?(DictatorDAO|DictatorToken).json\""
   },
   "dependencies": {
     "@boringcrypto/boring-solidity": "boringcrypto/BoringSolidity",
     "@boringcrypto/hardhat-framework": "boringcrypto/hardhat-framework"
+  },
+  "devDependencies": {
+    "@typechain/ethers-v4": "^4.0.0",
+    "@typechain/ethers-v5": "^6.0.5",
+    "ethers": "^5.1.4",
+    "typechain": "^4.0.3",
+    "typechain-target-ethers-v5": "^5.0.1",
+    "typescript": "^4.2.4"
   }
 }
