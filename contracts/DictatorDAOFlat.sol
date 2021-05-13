@@ -84,18 +84,21 @@ contract Domain {
 
     // solhint-disable var-name-mixedcase
     bytes32 private immutable _DOMAIN_SEPARATOR;
-    uint256 private immutable DOMAIN_SEPARATOR_CHAIN_ID;
+    uint256 private immutable DOMAIN_SEPARATOR_CHAIN_ID;    
 
     /// @dev Calculate the DOMAIN_SEPARATOR
     function _calculateDomainSeparator(uint256 chainId) private view returns (bytes32) {
-        return keccak256(abi.encode(DOMAIN_SEPARATOR_SIGNATURE_HASH, chainId, address(this)));
+        return keccak256(
+            abi.encode(
+                DOMAIN_SEPARATOR_SIGNATURE_HASH,
+                chainId,
+                address(this)
+            )
+        );
     }
 
     constructor() public {
-        uint256 chainId;
-        assembly {
-            chainId := chainid()
-        }
+        uint256 chainId; assembly {chainId := chainid()}
         _DOMAIN_SEPARATOR = _calculateDomainSeparator(DOMAIN_SEPARATOR_CHAIN_ID = chainId);
     }
 
@@ -104,15 +107,19 @@ contract Domain {
     // with the desired public name, such as DOMAIN_SEPARATOR or domainSeparator.
     // solhint-disable-next-line func-name-mixedcase
     function _domainSeparator() internal view returns (bytes32) {
-        uint256 chainId;
-        assembly {
-            chainId := chainid()
-        }
+        uint256 chainId; assembly {chainId := chainid()}
         return chainId == DOMAIN_SEPARATOR_CHAIN_ID ? _DOMAIN_SEPARATOR : _calculateDomainSeparator(chainId);
     }
 
     function _getDigest(bytes32 dataHash) internal view returns (bytes32 digest) {
-        digest = keccak256(abi.encodePacked(EIP191_PREFIX_FOR_EIP712_STRUCTURED_DATA, _domainSeparator(), dataHash));
+        digest =
+            keccak256(
+                abi.encodePacked(
+                    EIP191_PREFIX_FOR_EIP712_STRUCTURED_DATA,
+                    _domainSeparator(),
+                    dataHash
+                )
+            );
     }
 }
 
@@ -223,11 +230,9 @@ contract ERC20 is ERC20Data, Domain {
     ) external {
         require(owner_ != address(0), "ERC20: Owner cannot be 0");
         require(block.timestamp < deadline, "ERC20: Expired");
-        require(
-            ecrecover(_getDigest(keccak256(abi.encode(PERMIT_SIGNATURE_HASH, owner_, spender, value, nonces[owner_]++, deadline))), v, r, s) ==
-                owner_,
-            "ERC20: Invalid Signature"
-        );
+        require(ecrecover(_getDigest(keccak256(abi.encode(
+                PERMIT_SIGNATURE_HASH, owner_, spender, value, nonces[owner_]++, deadline
+            ))), v, r, s) == owner_, "ERC20: Invalid Signature");
         allowance[owner_][spender] = value;
         emit Approval(owner_, spender, value);
     }
@@ -279,7 +284,7 @@ library BoringERC20 {
             return abi.decode(data, (string));
         } else if (data.length == 32) {
             uint8 i = 0;
-            while (i < 32 && data[i] != 0) {
+            while(i < 32 && data[i] != 0) {
                 i++;
             }
             bytes memory bytesArray = new bytes(i);
@@ -529,6 +534,11 @@ interface IRewarder {
 // File contracts/DictatorDAO.sol
 //License-Identifier: MIT
 pragma solidity ^0.6.12;
+
+
+
+
+
 
 // DAO code/operator management/dutch auction, etc by BoringCrypto
 // Staking in DictatorDAO inspired by Chef Nomi's SushiBar (heavily modified) - MIT license (originally WTFPL)

@@ -1,8 +1,5 @@
 module.exports = require("@boringcrypto/hardhat-framework").config.hardhat(require("./settings").hardhat)
 const fs = require("fs")
-const fsExtra = require("fs-extra")
-const findup = require("find-up")
-const path = require("path")
 
 function getSortedFiles(dependenciesGraph) {
     const tsort = require("tsort")
@@ -18,23 +15,14 @@ function getSortedFiles(dependenciesGraph) {
         }
     }
 
-    try {
-        const topologicalSortedNames = graph.sort()
+    const topologicalSortedNames = graph.sort()
 
-        // If an entry has no dependency it won't be included in the graph, so we
-        // add them and then dedup the array
-        const withEntries = topologicalSortedNames.concat(resolvedFiles.map((f) => f.sourceName))
+    // If an entry has no dependency it won't be included in the graph, so we
+    // add them and then dedup the array
+    const withEntries = topologicalSortedNames.concat(resolvedFiles.map((f) => f.sourceName))
 
-        const sortedNames = [...new Set(withEntries)]
-        return sortedNames.map((n) => filesMap[n])
-    } catch (error) {
-        if (error.toString().includes("Error: There is a cycle in the graph.")) {
-            throw new HardhatError(ERRORS.BUILTIN_TASKS.FLATTEN_CYCLE, error)
-        }
-
-        // tslint:disable-next-line only-hardhat-error
-        throw error
-    }
+    const sortedNames = [...new Set(withEntries)]
+    return sortedNames.map((n) => filesMap[n])
 }
 
 function getFileWithoutImports(resolvedFile) {
@@ -48,6 +36,7 @@ subtask("flat:get-flattened-sources", "Returns all contracts and their dependenc
     .addOptionalParam("output", undefined, undefined, types.string)
     .setAction(async ({ files, output }, { run }) => {
         const dependencyGraph = await run("flat:get-dependency-graph", { files })
+        console.log(dependencyGraph)
 
         let flattened = ""
 
