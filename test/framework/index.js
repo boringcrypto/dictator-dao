@@ -74,7 +74,7 @@ async function createFixture(deployments, thisObject, stepsFunction) {
         const cmd = {
             getContract: getContractFunction,
             deploy: deployFunction,
-            attach: attachFunction
+            attach: attachFunction,
         }
 
         await stepsFunction(cmd)
@@ -86,5 +86,5 @@ module.exports = {
     e10,
     BN,
     addr,
-    createFixture
+    createFixture,
 }

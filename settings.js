@@ -1,5 +1,5 @@
 module.exports = {
-    hardhat: { },
-    solcover: { },
-    prettier: { }
+    hardhat: {},
+    solcover: {},
+    prettier: {},
 }

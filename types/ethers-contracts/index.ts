@@ -2,7 +2,9 @@
 /* tslint:disable */
 /* eslint-disable */
 export type { DictatorDAO } from "./DictatorDAO";
+export type { DictatorDeployer } from "./DictatorDeployer";
 export type { DictatorToken } from "./DictatorToken";
 
 export { DictatorDAO__factory } from "./factories/DictatorDAO__factory";
+export { DictatorDeployer__factory } from "./factories/DictatorDeployer__factory";
 export { DictatorToken__factory } from "./factories/DictatorToken__factory";
